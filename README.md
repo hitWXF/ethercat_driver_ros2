@@ -14,7 +14,7 @@ Implementation of a `Hardware Interface` for simple Ethercat module integration 
 Parts of the driver are based on the implementation of [`SimplECAT`](https://bitbucket.org/bsoe/simplecat/src/master/).
 
 ## 关于这个分支
-这个分支支持使用一个从站yaml文件，配置多个组件（joint、gpio、sensor），关于使用这个分支的例子可以查看[`fd_controller`]()。
+这个分支支持使用一个从站yaml文件，配置多个组件（joint、gpio、sensor），关于使用这个分支的例子可以查看[`fd_controller`](https://github.com/hitWXF/fd_controller.git)。
 
 ## Contacts ##
 ![icube](https://icube.unistra.fr/fileadmin/templates/DUN/icube/images/logo.png)
