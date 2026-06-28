@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by wang.xinfei  2026-06-27
+// modify the code to support: one slave has multiple components
+// but not support Transfer ...  
+
+
 #ifndef ETHERCAT_DRIVER__ETHERCAT_DRIVER_HPP_
 #define ETHERCAT_DRIVER__ETHERCAT_DRIVER_HPP_
 
@@ -114,10 +119,23 @@ protected:
   std::vector<std::vector<double>> hw_joint_commands_;
   std::vector<std::vector<double>> hw_sensor_commands_;
   std::vector<std::vector<double>> hw_gpio_commands_;
+  std::vector<std::vector<double>> hw_commands_all_;
+
+  std::vector<std::vector<std::string>> hw_command_prefix_names_;
+  std::vector<std::vector<std::string>> hw_command_interface_names_;
+
   std::vector<std::vector<double>> hw_joint_states_;
   std::vector<std::vector<double>> hw_sensor_states_;
   std::vector<std::vector<double>> hw_gpio_states_;
+  std::vector<std::vector<double>> hw_states_all_;
 
+  std::vector<std::vector<std::string>> hw_state_prefix_names_;
+  std::vector<std::vector<std::string>> hw_state_interface_names_;
+
+
+  std::vector<std::unordered_map<std::string, std::string>> module_param_map_;
+
+  // pluginlib class loader for loading EcSlave plugins
   pluginlib::ClassLoader<ethercat_interface::EcSlave> ec_loader_{
     "ethercat_interface", "ethercat_interface::EcSlave"};
 
@@ -137,6 +155,27 @@ protected:
 
   /** Empty interfaces */
   std::vector<double> empty_interface_;
+
+  uint32_t state_interface_offsite_;
+  uint32_t command_interface_offsite_;
+
+  enum IndexType : uint32_t{
+    TYPE_JOINT = 0,
+    TYPE_SENSOR = 1,
+    TYPE_GPIO = 2
+  };
+  enum SlaveType : uint32_t{
+    RESUSE_SLAVE = 0,
+    NEW_SLAVE = 1
+  };
+  struct IndexItem{
+    IndexType type;
+    uint32_t sub_index;
+    std::vector<std::unordered_map<uint,SlaveType>> slave_type_map;
+    // uint slave_position;
+    // SlaveType slave_type;
+  };
+  std::vector<IndexItem> total_index_;
 };
 }  // namespace ethercat_driver
 

@@ -147,9 +147,15 @@ void EcMaster::addSlave(EcSlave * slave)
     uint32_t domain_index = iter.first;
     DomainInfo * domain = NULL;
     if (domain_info_.count(domain_index)) {
+      RCLCPP_INFO(
+        rclcpp::get_logger("ec_master"),
+        "Domain %d already exists", domain_index);
       domain = domain_info_.at(domain_index);
     }
     if (domain == NULL) {
+      RCLCPP_INFO(
+        rclcpp::get_logger("ec_master"),
+        "Creating domain %d", domain_index);
       domain = new DomainInfo(master_);
       domain_info_[domain_index] = domain;
     }
@@ -185,6 +191,12 @@ void EcMaster::registerPDOInDomain(
 {
   // expand the size of the domain
   uint32_t num_pdo_regs = channel_indices.size();
+  
+  RCLCPP_INFO(
+    rclcpp::get_logger("ec_master --registerPDOInDomain"),
+    "Registering %d PDOs , origin domain_regs size: %d",
+    num_pdo_regs, domain_info->domain_regs.size());
+
   size_t start_index = domain_info->domain_regs.size() - 1;  // empty element at end
   domain_info->domain_regs.resize(domain_info->domain_regs.size() + num_pdo_regs);
 

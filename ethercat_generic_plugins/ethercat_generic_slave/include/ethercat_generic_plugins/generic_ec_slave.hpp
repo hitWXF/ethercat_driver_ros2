@@ -14,13 +14,17 @@
 //
 // Author: Maciej Bednarczyk (macbednarczyk@gmail.com)
 
+
+// Modified by wang.xinfei  2026-06-27
+// add some print
+
 #ifndef ETHERCAT_GENERIC_PLUGINS__GENERIC_EC_SLAVE_HPP_
 #define ETHERCAT_GENERIC_PLUGINS__GENERIC_EC_SLAVE_HPP_
 
 #include <vector>
 #include <string>
 #include <unordered_map>
-
+#include "rclcpp/rclcpp.hpp"
 #include "yaml-cpp/yaml.h"
 #include "ethercat_interface/ec_slave.hpp"
 #include "ethercat_interface/ec_pdo_channel_manager.hpp"

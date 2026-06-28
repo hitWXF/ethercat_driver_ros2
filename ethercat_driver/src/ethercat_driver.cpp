@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by wang.xinfei  2026-06-27
+// modify the code to support: one slave has multiple components
+// but not support Transfer ...  
+
 #include "ethercat_driver/ethercat_driver.hpp"
 
 #include <tinyxml2.h>
@@ -98,165 +102,509 @@ CallbackReturn EthercatDriver::on_init(
   const std::lock_guard<std::mutex> lock(ec_mutex_);
   activated_ = false;
 
+  uint slaves_count = std::stoi(info_.hardware_parameters["slaves"]);
+  module_param_map_.resize(slaves_count);
+  hw_commands_all_.resize(slaves_count);
+  hw_states_all_.resize(slaves_count);
+  hw_command_prefix_names_.resize(slaves_count);
+  hw_command_interface_names_.resize(slaves_count);
+  hw_state_interface_names_.resize(slaves_count);
+  hw_state_prefix_names_.resize(slaves_count);
+  state_interface_offsite_ = 0;
+  command_interface_offsite_ = 0;
   // Set state vectors
+  
+  std::vector<uint32_t> all_states_size_in_slave(slaves_count, 0);
+
   hw_joint_states_.resize(info_.joints.size());
   for (uint j = 0; j < info_.joints.size(); j++) {
     hw_joint_states_[j].resize(
       info_.joints[j].state_interfaces.size(),
       std::numeric_limits<double>::quiet_NaN());
+    
   }
-  hw_sensor_states_.resize(info_.sensors.size());
-  for (uint s = 0; s < info_.sensors.size(); s++) {
-    hw_sensor_states_[s].resize(
-      info_.sensors[s].state_interfaces.size(),
-      std::numeric_limits<double>::quiet_NaN());
+  for (uint j = 0; j < info_.joints.size(); j++) {
+    auto module_params = getEcModuleParam(info_.original_xml, info_.joints[j].name, "joint");
+    if (!module_params.empty()) {
+      for (auto i = 0ul; i < module_params.size(); i++) {
+        uint position = std::stoi(module_params[i]["position"]);
+        all_states_size_in_slave[position] += info_.joints[j].state_interfaces.size();
+      }
+    }
   }
+
   hw_gpio_states_.resize(info_.gpios.size());
   for (uint g = 0; g < info_.gpios.size(); g++) {
     hw_gpio_states_[g].resize(
       info_.gpios[g].state_interfaces.size(),
       std::numeric_limits<double>::quiet_NaN());
   }
+  for (uint g = 0; g < info_.gpios.size(); g++) {
+    auto module_params = getEcModuleParam(info_.original_xml, info_.gpios[g].name, "gpio");
+    if (!module_params.empty()) {
+      for (auto i = 0ul; i < module_params.size(); i++) {
+        uint position = std::stoi(module_params[i]["position"]);
+        all_states_size_in_slave[position] += info_.gpios[g].state_interfaces.size();
+      }
+    }
+  }  
+
+  hw_sensor_states_.resize(info_.sensors.size());
+  for (uint s = 0; s < info_.sensors.size(); s++) {
+    hw_sensor_states_[s].resize(
+      info_.sensors[s].state_interfaces.size(),
+      std::numeric_limits<double>::quiet_NaN());
+  }
+  for (uint s = 0; s < info_.sensors.size(); s++) {
+    auto module_params = getEcModuleParam(info_.original_xml, info_.sensors[s].name, "sensor");
+    if (!module_params.empty()) {
+      for (auto i = 0ul; i < module_params.size(); i++) {
+        uint position = std::stoi(module_params[i]["position"]);
+        all_states_size_in_slave[position] += info_.sensors[s].state_interfaces.size();
+      }
+    }
+  }
+
+  for (uint s = 0; s < slaves_count; s++) {
+    hw_states_all_[s].resize(all_states_size_in_slave[s], std::numeric_limits<double>::quiet_NaN());
+  }
 
   // Set command vectors
+  std::vector<uint32_t> all_commands_size_in_slave(slaves_count, 0);
+
   hw_joint_commands_.resize(info_.joints.size());
   for (uint j = 0; j < info_.joints.size(); j++) {
+    auto module_params = getEcModuleParam(info_.original_xml, info_.joints[j].name, "joint");
+    if (!module_params.empty()) {
+      std::vector<std::unordered_map<uint,SlaveType>> slave_type_map;
+      for (auto i = 0ul; i < module_params.size(); i++) {
+        uint position = std::stoi(module_params[i]["position"]);
+        all_commands_size_in_slave[position] += info_.joints[j].command_interfaces.size();
+        if(module_params[i].find("reuse_ec_module") != module_params[i].end() && module_params[i]["reuse_ec_module"] == "true") {
+          slave_type_map.push_back(
+            std::unordered_map<uint,SlaveType>{
+                {position, SlaveType::RESUSE_SLAVE}
+            }
+          );
+
+        } else {
+          slave_type_map.push_back(
+            std::unordered_map<uint,SlaveType>{
+                {position, SlaveType::NEW_SLAVE}
+            }
+          );          
+        }
+      }
+      total_index_.push_back({IndexType::TYPE_JOINT, j, slave_type_map});
+    }
     hw_joint_commands_[j].resize(
       info_.joints[j].command_interfaces.size(),
       std::numeric_limits<double>::quiet_NaN());
   }
-  hw_sensor_commands_.resize(info_.sensors.size());
-  for (uint s = 0; s < info_.sensors.size(); s++) {
-    hw_sensor_commands_[s].resize(
-      info_.sensors[s].command_interfaces.size(),
-      std::numeric_limits<double>::quiet_NaN());
-  }
+
   hw_gpio_commands_.resize(info_.gpios.size());
   for (uint g = 0; g < info_.gpios.size(); g++) {
+    auto module_params = getEcModuleParam(info_.original_xml, info_.gpios[g].name, "gpio");
+    if (!module_params.empty()) {
+      std::vector<std::unordered_map<uint,SlaveType>> slave_type_map;
+      for (auto i = 0ul; i < module_params.size(); i++) {
+        uint position = std::stoi(module_params[i]["position"]);
+        all_commands_size_in_slave[position] += info_.gpios[g].command_interfaces.size();
+        if(module_params[i].find("reuse_ec_module") != module_params[i].end() && module_params[i]["reuse_ec_module"] == "true") {
+          slave_type_map.push_back(
+            std::unordered_map<uint,SlaveType>{
+                {position, SlaveType::RESUSE_SLAVE}
+            }
+          );
+        } else {
+          slave_type_map.push_back(
+            std::unordered_map<uint,SlaveType>{
+                {position, SlaveType::NEW_SLAVE}
+            }
+          );
+        }
+      }
+      total_index_.push_back({IndexType::TYPE_GPIO, g, slave_type_map});
+    }
     hw_gpio_commands_[g].resize(
       info_.gpios[g].command_interfaces.size(),
       std::numeric_limits<double>::quiet_NaN());
   }
 
-  // Setup slave modules defined per joints in the URDF
-  for (uint j = 0; j < info_.joints.size(); j++) {
-    RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "joints");
-    // check all joints for EC modules and load into ec_modules_
-    auto module_params = getEcModuleParam(info_.original_xml, info_.joints[j].name, "joint");
-    ec_module_parameters_.insert(
-      ec_module_parameters_.end(), module_params.begin(), module_params.end());
-    for (auto i = 0ul; i < module_params.size(); i++) {
-      for (auto k = 0ul; k < info_.joints[j].state_interfaces.size(); k++) {
-        module_params[i]["state_interface/" +
-          info_.joints[j].state_interfaces[k].name] = std::to_string(k);
-      }
-      for (auto k = 0ul; k < info_.joints[j].command_interfaces.size(); k++) {
-        module_params[i]["command_interface/" +
-          info_.joints[j].command_interfaces[k].name] = std::to_string(k);
-      }
-      try {
-        auto module = ec_loader_.createSharedInstance(module_params[i].at("plugin"));
-        if (!module->setupSlave(
-            module_params[i], &hw_joint_states_[j], &hw_joint_commands_[j]))
-        {
-          RCLCPP_FATAL(
-            rclcpp::get_logger("EthercatDriver"),
-            "Setup of Joint module %li FAILED.", i + 1);
-          return CallbackReturn::ERROR;
-        }
-        module->setAliasAndPosition(
-          getAliasOrDefaultAlias(module_params[i]),
-          std::stoul(module_params[i].at("position")));
-        ec_modules_.push_back(module);
-      } catch (pluginlib::PluginlibException & ex) {
-        RCLCPP_FATAL(
-          rclcpp::get_logger("EthercatDriver"),
-          "The plugin of %s failed to load for some reason. Error: %s\n",
-          info_.joints[j].name.c_str(), ex.what());
-      }
-    }
-  }
-
-  // Setup slave modules defined per GPIOs in the URDF
-  for (uint g = 0; g < info_.gpios.size(); g++) {
-    RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "gpios");
-    // check all gpios for EC modules and load into ec_modules_
-    auto module_params = getEcModuleParam(info_.original_xml, info_.gpios[g].name, "gpio");
-    ec_module_parameters_.insert(
-      ec_module_parameters_.end(), module_params.begin(), module_params.end());
-    for (auto i = 0ul; i < module_params.size(); i++) {
-      for (auto k = 0ul; k < info_.gpios[g].state_interfaces.size(); k++) {
-        module_params[i]["state_interface/" +
-          info_.gpios[g].state_interfaces[k].name] = std::to_string(k);
-      }
-      for (auto k = 0ul; k < info_.gpios[g].command_interfaces.size(); k++) {
-        module_params[i]["command_interface/" +
-          info_.gpios[g].command_interfaces[k].name] = std::to_string(k);
-      }
-      try {
-        auto module = ec_loader_.createSharedInstance(module_params[i].at("plugin"));
-        if (!module->setupSlave(
-            module_params[i], &hw_gpio_states_[g], &hw_gpio_commands_[g]))
-        {
-          RCLCPP_FATAL(
-            rclcpp::get_logger("EthercatDriver"),
-            "Setup of GPIO module %li FAILED.", i + 1);
-          return CallbackReturn::ERROR;
-        }
-        module->setAliasAndPosition(
-          getAliasOrDefaultAlias(module_params[i]),
-          std::stoul(module_params[i].at("position")));
-        ec_modules_.push_back(module);
-      } catch (pluginlib::PluginlibException & ex) {
-        RCLCPP_FATAL(
-          rclcpp::get_logger("EthercatDriver"),
-          "The plugin of %s failed to load for some reason. Error: %s\n",
-          info_.gpios[g].name.c_str(), ex.what());
-      }
-    }
-  }
-
-  // Setup slave modules defined per sensors in the URDF
+  hw_sensor_commands_.resize(info_.sensors.size());
   for (uint s = 0; s < info_.sensors.size(); s++) {
-    RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "sensors");
-    // check all sensors for EC modules and load into ec_modules_
     auto module_params = getEcModuleParam(info_.original_xml, info_.sensors[s].name, "sensor");
-    ec_module_parameters_.insert(
-      ec_module_parameters_.end(), module_params.begin(), module_params.end());
-    for (auto i = 0ul; i < module_params.size(); i++) {
-      for (auto k = 0ul; k < info_.sensors[s].state_interfaces.size(); k++) {
-        module_params[i]["state_interface/" +
-          info_.sensors[s].state_interfaces[k].name] = std::to_string(k);
-      }
-      for (auto k = 0ul; k < info_.sensors[s].command_interfaces.size(); k++) {
-        module_params[i]["command_interface/" +
-          info_.sensors[s].command_interfaces[k].name] = std::to_string(k);
-      }
-      try {
-        auto module = ec_loader_.createSharedInstance(module_params[i].at("plugin"));
-        if (!module->setupSlave(
-            module_params[i], &hw_sensor_states_[s], &hw_sensor_commands_[s]))
-        {
-          RCLCPP_FATAL(
-            rclcpp::get_logger("EthercatDriver"),
-            "Setup of Sensor module %li FAILED.", i + 1);
-          return CallbackReturn::ERROR;
+    if (!module_params.empty()) {
+      std::vector<std::unordered_map<uint,SlaveType>> slave_type_map;
+      for (auto i = 0ul; i < module_params.size(); i++) {
+        uint position = std::stoi(module_params[i]["position"]);
+        all_commands_size_in_slave[position] += info_.sensors[s].command_interfaces.size();
+        if(module_params[i].find("reuse_ec_module") != module_params[i].end() && module_params[i]["reuse_ec_module"] == "true") {
+          slave_type_map.push_back(
+            std::unordered_map<uint,SlaveType>{
+                {position, SlaveType::RESUSE_SLAVE}
+            }
+          );
+        } else {
+          slave_type_map.push_back(
+            std::unordered_map<uint,SlaveType>{
+                {position, SlaveType::NEW_SLAVE}
+            }
+          );
         }
-        module->setAliasAndPosition(
-          getAliasOrDefaultAlias(module_params[i]),
-          std::stoul(module_params[i].at("position")));
-        ec_modules_.push_back(module);
-      } catch (pluginlib::PluginlibException & ex) {
-        RCLCPP_FATAL(
-          rclcpp::get_logger("EthercatDriver"),
-          "The plugin of %s failed to load for some reason. Error: %s\n",
-          info_.sensors[s].name.c_str(), ex.what());
+      }
+      total_index_.push_back({IndexType::TYPE_SENSOR, s, slave_type_map});
+    }
+    hw_sensor_commands_[s].resize(
+      info_.sensors[s].command_interfaces.size(),
+      std::numeric_limits<double>::quiet_NaN());
+  }
+
+
+  for (uint s = 0; s < slaves_count; s++) {
+    hw_commands_all_[s].resize(all_commands_size_in_slave[s], std::numeric_limits<double>::quiet_NaN());
+  }
+
+  
+  std::vector<uint32_t> global_state_index(slaves_count, 0);
+  std::vector<uint32_t> global_command_index(slaves_count, 0);
+  // multi components in one slave
+  for (uint t = 0; t < total_index_.size(); t++){
+    uint ec_module_count = total_index_[t].slave_type_map.size();
+    IndexType component_type = total_index_[t].type;
+    uint32_t sub_index = total_index_[t].sub_index;
+    // Setup slave modules defined per joints in the URDF
+    if (component_type == IndexType::TYPE_JOINT) {
+      // joint component
+      auto module_params = getEcModuleParam(info_.original_xml, info_.joints[sub_index].name, "joint");
+      ec_module_parameters_.insert(
+        ec_module_parameters_.end(), module_params.begin(), module_params.end());
+      for (auto i = 0ul; i < ec_module_count; i++) {
+        // one component can have multiple ec_module
+        auto &one_map = total_index_[t].slave_type_map[i];
+        uint slave_position = 0;
+        SlaveType slave_type = SlaveType::NEW_SLAVE;
+        for (auto &pair : one_map)
+        {
+            slave_position = pair.first;
+            slave_type = pair.second;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "joints : %s, slave_position: %d", info_.joints[sub_index].name.c_str(), slave_position);
+        for (auto k = 0ul; k < info_.joints[sub_index].state_interfaces.size(); k++){
+          module_param_map_[slave_position]["state_interface/" + 
+            info_.joints[sub_index].name + "/" +
+            info_.joints[sub_index].state_interfaces[k].name] = std::to_string(global_state_index[slave_position]);
+          global_state_index[slave_position]++;
+          hw_state_prefix_names_[slave_position].push_back(info_.joints[sub_index].name);
+          hw_state_interface_names_[slave_position].push_back(info_.joints[sub_index].state_interfaces[k].name);
+        }
+        for (auto k = 0ul; k < info_.joints[sub_index].command_interfaces.size(); k++){
+          module_param_map_[slave_position]["command_interface/" + 
+            info_.joints[sub_index].name + "/" +
+            info_.joints[sub_index].command_interfaces[k].name] = std::to_string(global_command_index[slave_position]);
+          global_command_index[slave_position]++;
+          hw_command_prefix_names_[slave_position].push_back(info_.joints[sub_index].name);
+          hw_command_interface_names_[slave_position].push_back(info_.joints[sub_index].command_interfaces[k].name);
+          
+        }
+        if (slave_type == SlaveType::NEW_SLAVE) {
+          for (const auto& param : module_params[i]) {
+            module_param_map_[slave_position][param.first] = param.second;
+          }
+        }
+        if (slave_type == SlaveType::RESUSE_SLAVE) {
+          // if not exist
+          for (const auto& param : module_params[i]) {
+            if (module_param_map_[slave_position].find(param.first) == module_param_map_[slave_position].end()) {
+              module_param_map_[slave_position][param.first] = param.second;
+            }
+          }
+        }
+      }
+    }
+    // Setup slave modules defined per GPIOs in the URDF
+    if (component_type == IndexType::TYPE_GPIO) { 
+      // gpio component
+      auto module_params = getEcModuleParam(info_.original_xml, info_.gpios[sub_index].name, "gpio");
+      ec_module_parameters_.insert(
+        ec_module_parameters_.end(), module_params.begin(), module_params.end());
+      for (auto i = 0ul; i < ec_module_count; i++) {
+        // one component can have multiple ec_module
+        auto &one_map = total_index_[t].slave_type_map[i];
+        uint slave_position = 0;
+        SlaveType slave_type = SlaveType::NEW_SLAVE;
+        for (auto &pair : one_map)
+        {
+            slave_position = pair.first;
+            slave_type = pair.second;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "gpios : %s, slave_position: %d", info_.gpios[sub_index].name.c_str(), slave_position);
+        for (auto k = 0ul; k < info_.gpios[sub_index].state_interfaces.size(); k++){
+          module_param_map_[slave_position]["state_interface/" + 
+            info_.gpios[sub_index].name + "/" +
+            info_.gpios[sub_index].state_interfaces[k].name] = std::to_string(global_state_index[slave_position]);
+          global_state_index[slave_position]++;
+          hw_state_prefix_names_[slave_position].push_back(info_.gpios[sub_index].name);
+          hw_state_interface_names_[slave_position].push_back(info_.gpios[sub_index].state_interfaces[k].name);
+        }
+        for (auto k = 0ul; k < info_.gpios[sub_index].command_interfaces.size(); k++){
+          module_param_map_[slave_position]["command_interface/" + 
+            info_.gpios[sub_index].name + "/" +
+            info_.gpios[sub_index].command_interfaces[k].name] = std::to_string(global_command_index[slave_position]);
+          global_command_index[slave_position]++;
+          hw_command_prefix_names_[slave_position].push_back(info_.gpios[sub_index].name);
+          hw_command_interface_names_[slave_position].push_back(info_.gpios[sub_index].command_interfaces[k].name);
+        }
+        if (slave_type == SlaveType::NEW_SLAVE) {
+          for (const auto& param : module_params[i]) {
+            module_param_map_[slave_position][param.first] = param.second;
+          }
+        }
+        if (slave_type == SlaveType::RESUSE_SLAVE) {
+          // if not exist
+          for (const auto& param : module_params[i]) {
+            if (module_param_map_[slave_position].find(param.first) == module_param_map_[slave_position].end()) {
+              module_param_map_[slave_position][param.first] = param.second;
+            }
+          }
+        }
+      }
+    }
+
+    // Setup slave modules defined per sensors in the URDF
+    if (component_type == IndexType::TYPE_SENSOR) {
+      // sensor component
+      auto module_params = getEcModuleParam(info_.original_xml, info_.sensors[sub_index].name, "sensor");
+      ec_module_parameters_.insert(
+        ec_module_parameters_.end(), module_params.begin(), module_params.end());
+      for (auto i = 0ul; i < ec_module_count; i++) {
+        // one component can have multiple ec_module
+        auto &one_map = total_index_[t].slave_type_map[i];
+        uint slave_position = 0;
+        SlaveType slave_type = SlaveType::NEW_SLAVE;
+        for (auto &pair : one_map)
+        {
+            slave_position = pair.first;
+            slave_type = pair.second;
+        }
+        RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "sensors : %s, slave_position: %d", info_.sensors[sub_index].name.c_str(), slave_position);
+        for (auto k = 0ul; k < info_.sensors[sub_index].state_interfaces.size(); k++){
+          module_param_map_[slave_position]["state_interface/" + 
+            info_.sensors[sub_index].name + "/" +
+            info_.sensors[sub_index].state_interfaces[k].name] = std::to_string(global_state_index[slave_position]);
+          global_state_index[slave_position]++;
+          hw_state_prefix_names_[slave_position].push_back(info_.sensors[sub_index].name);
+          hw_state_interface_names_[slave_position].push_back(info_.sensors[sub_index].state_interfaces[k].name);
+        }
+        for (auto k = 0ul; k < info_.sensors[sub_index].command_interfaces.size(); k++){
+          module_param_map_[slave_position]["command_interface/" + 
+            info_.sensors[sub_index].name + "/" +
+            info_.sensors[sub_index].command_interfaces[k].name] = std::to_string(global_command_index[slave_position]);
+          global_command_index[slave_position]++;
+          hw_command_prefix_names_[slave_position].push_back(info_.sensors[sub_index].name);
+          hw_command_interface_names_[slave_position].push_back(info_.sensors[sub_index].command_interfaces[k].name);
+        }
+        if (slave_type == SlaveType::NEW_SLAVE) {
+          for (const auto& param : module_params[i]) {
+            module_param_map_[slave_position][param.first] = param.second;
+          }
+        }
+        if (slave_type == SlaveType::RESUSE_SLAVE) {
+          // if not exist
+          for (const auto& param : module_params[i]) {
+            if (module_param_map_[slave_position].find(param.first) == module_param_map_[slave_position].end()) {
+              module_param_map_[slave_position][param.first] = param.second;
+            }
+          }
+        }
       }
     }
   }
+  // setup slave
+  for (uint s = 0; s < slaves_count; s++) {
+    if (module_param_map_[s].empty()) {
+      RCLCPP_WARN(
+        rclcpp::get_logger("EthercatDriver"),
+        "No module parameters found for slave %d. This slave will not be initialized.",
+        s);
+      continue;
+    }
+    try {
+      auto module = ec_loader_.createSharedInstance(module_param_map_[s].at("plugin"));
+      if (!module->setupSlave(
+          module_param_map_[s], &hw_states_all_[s], &hw_commands_all_[s]))
+      {
+        RCLCPP_FATAL(
+          rclcpp::get_logger("EthercatDriver"),
+          "Setup of slave %d FAILED.", s);
+        return CallbackReturn::ERROR;
+      }
+      module->setAliasAndPosition(
+        getAliasOrDefaultAlias(module_param_map_[s]),
+        std::stoul(module_param_map_[s].at("position")));
+      ec_modules_.push_back(module);
+    } catch (pluginlib::PluginlibException & ex) {
+      RCLCPP_FATAL(
+        rclcpp::get_logger("EthercatDriver"),
+        "The plugin of slave %d failed to load for some reason. Error: %s\n",
+        s, ex.what());
+    }
+  }
+  /*
+    // // Setup slave modules defined per joints in the URDF
+    // for (uint j = 0; j < info_.joints.size(); j++) {
+    //   RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "joints");
+    //   // check all joints for EC modules and load into ec_modules_
+    //   auto module_params = getEcModuleParam(info_.original_xml, info_.joints[j].name, "joint");
 
-  RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "Got %li modules", ec_modules_.size());
+    //   ec_module_parameters_.insert(
+    //     ec_module_parameters_.end(), module_params.begin(), module_params.end());
+    //   for (auto i = 0ul; i < module_params.size(); i++) {
+    //     for (auto k = 0ul; k < info_.joints[j].state_interfaces.size(); k++) {
+    //       module_params[i]["state_interface/" +
+    //         info_.joints[j].state_interfaces[k].name] = std::to_string(k);
+    //     }
+    //     state_interface_offsite_ += info_.joints[j].state_interfaces.size();
+    //     for (auto k = 0ul; k < info_.joints[j].command_interfaces.size(); k++) {
+    //       module_params[i]["command_interface/" +
+    //         info_.joints[j].command_interfaces[k].name] = std::to_string(k);
+    //     }
+    //     command_interface_offsite_ += info_.joints[j].command_interfaces.size();
+    //     try {
+    //       auto module = ec_loader_.createSharedInstance(module_params[i].at("plugin"));
+    //       if (!module->setupSlave(
+    //           module_params[i], &hw_joint_states_[j], &hw_joint_commands_[j]))
+    //       {
+    //         RCLCPP_FATAL(
+    //           rclcpp::get_logger("EthercatDriver"),
+    //           "Setup of Joint module %li FAILED.", i + 1);
+    //         return CallbackReturn::ERROR;
+    //       }
+    //       module->setAliasAndPosition(
+    //         getAliasOrDefaultAlias(module_params[i]),
+    //         std::stoul(module_params[i].at("position")));
+    //       ec_modules_.push_back(module);
+    //     } catch (pluginlib::PluginlibException & ex) {
+    //       RCLCPP_FATAL(
+    //         rclcpp::get_logger("EthercatDriver"),
+    //         "The plugin of %s failed to load for some reason. Error: %s\n",
+    //         info_.joints[j].name.c_str(), ex.what());
+    //     }
+    //   }
+    // }
 
+    // // Setup slave modules defined per GPIOs in the URDF
+    // for (uint g = 0; g < info_.gpios.size(); g++) {
+    //   RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "gpios");
+    //   // check all gpios for EC modules and load into ec_modules_
+    //   auto module_params = getEcModuleParam(info_.original_xml, info_.gpios[g].name, "gpio");
+
+    //   bool first_module = false;
+    //   bool reuse_module = false;
+    //   bool last_module = false;
+
+    //   if (!module_params.empty() &&
+    //       module_params[0].find("first_ec_module") != module_params[0].end()) {
+    //     first_module = module_params[0]["first_ec_module"] == "true";
+    //     RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "first_ec_module: %s", first_module ? "true" : "false");
+    //   }
+
+    //   if (!module_params.empty() &&
+    //       module_params[0].find("reuse_ec_module") != module_params[0].end()) {
+    //     reuse_module = module_params[0]["reuse_ec_module"] == "true";
+    //     RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "reuse_ec_module: %s", reuse_module ? "true" : "false");
+    //   }
+
+    //   if (!module_params.empty() &&
+    //       module_params[0].find("last_ec_module") != module_params[0].end()) {
+    //     last_module = module_params[0]["last_ec_module"] == "true";
+    //     RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "last_ec_module: %s", last_module ? "true" : "false");
+    //   }
+
+    //   RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "gpios module_params size %d",module_params.size());
+
+    //   ec_module_parameters_.insert(
+    //     ec_module_parameters_.end(), module_params.begin(), module_params.end());
+
+    //   for (auto i = 0ul; i < module_params.size(); i++) { //一个gpio标签中的ec_module的个数
+    //     for (auto k = 0ul; k < info_.gpios[g].state_interfaces.size(); k++) {
+    //       module_params[i]["state_interface/" +
+    //         info_.gpios[g].state_interfaces[k].name] = std::to_string(k+state_interface_offsite_);
+    //     }
+    //     state_interface_offsite_ += info_.gpios[g].state_interfaces.size();
+    //     for (auto k = 0ul; k < info_.gpios[g].command_interfaces.size(); k++) {
+    //       module_params[i]["command_interface/" +
+    //         info_.gpios[g].command_interfaces[k].name] = std::to_string(k+command_interface_offsite_);
+    //     }
+    //     command_interface_offsite_ += info_.gpios[g].command_interfaces.size();
+    //     try {
+    //       auto module = ec_loader_.createSharedInstance(module_params[i].at("plugin"));
+    //       if (!module->setupSlave(
+    //           module_params[i], &hw_gpio_states_[g], &hw_gpio_commands_[g]))
+    //       {
+    //         RCLCPP_FATAL(
+    //           rclcpp::get_logger("EthercatDriver"),
+    //           "Setup of GPIO module %li FAILED.", i + 1);
+    //         return CallbackReturn::ERROR;
+    //       }
+    //       if(!reuse_module) {
+    //         module->setAliasAndPosition(
+    //           getAliasOrDefaultAlias(module_params[i]),
+    //           std::stoul(module_params[i].at("position")));
+    //         ec_modules_.push_back(module);
+    //       }
+    //     } catch (pluginlib::PluginlibException & ex) {
+    //       RCLCPP_FATAL(
+    //         rclcpp::get_logger("EthercatDriver"),
+    //         "The plugin of %s failed to load for some reason. Error: %s\n",
+    //         info_.gpios[g].name.c_str(), ex.what());
+    //     }
+    //   }
+    // }
+
+    // // Setup slave modules defined per sensors in the URDF
+    // for (uint s = 0; s < info_.sensors.size(); s++) {
+    //   RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "sensors");
+    //   // check all sensors for EC modules and load into ec_modules_
+    //   auto module_params = getEcModuleParam(info_.original_xml, info_.sensors[s].name, "sensor");
+    //   ec_module_parameters_.insert(
+    //     ec_module_parameters_.end(), module_params.begin(), module_params.end());
+    //   for (auto i = 0ul; i < module_params.size(); i++) {
+    //     for (auto k = 0ul; k < info_.sensors[s].state_interfaces.size(); k++) {
+    //       module_params[i]["state_interface/" +
+    //         info_.sensors[s].state_interfaces[k].name] = std::to_string(k);
+    //     }
+    //     for (auto k = 0ul; k < info_.sensors[s].command_interfaces.size(); k++) {
+    //       module_params[i]["command_interface/" +
+    //         info_.sensors[s].command_interfaces[k].name] = std::to_string(k);
+    //     }
+    //     try {
+    //       auto module = ec_loader_.createSharedInstance(module_params[i].at("plugin"));
+    //       if (!module->setupSlave(
+    //           module_params[i], &hw_sensor_states_[s], &hw_sensor_commands_[s]))
+    //       {
+    //         RCLCPP_FATAL(
+    //           rclcpp::get_logger("EthercatDriver"),
+    //           "Setup of Sensor module %li FAILED.", i + 1);
+    //         return CallbackReturn::ERROR;
+    //       }
+    //       module->setAliasAndPosition(
+    //         getAliasOrDefaultAlias(module_params[i]),
+    //         std::stoul(module_params[i].at("position")));
+    //       ec_modules_.push_back(module);
+    //     } catch (pluginlib::PluginlibException & ex) {
+    //       RCLCPP_FATAL(
+    //         rclcpp::get_logger("EthercatDriver"),
+    //         "The plugin of %s failed to load for some reason. Error: %s\n",
+    //         info_.sensors[s].name.c_str(), ex.what());
+    //     }
+    //   }
+    // } 
+    */
+
+    RCLCPP_INFO(rclcpp::get_logger("EthercatDriver"), "Got %li slaves", ec_modules_.size());
+
+  /*
   // Check if a transfer configuration is provided
   if (info_.hardware_parameters.find("fsoe_config") != info_.hardware_parameters.end() ||
     info_.hardware_parameters.find("transfer_config") != info_.hardware_parameters.end())
@@ -367,7 +715,7 @@ CallbackReturn EthercatDriver::on_init(
       rclcpp::get_logger("EthercatDriver"),
       "Transfer configuration loaded successfully!");
   }
-
+  */
   return CallbackReturn::SUCCESS;
 }
 
@@ -381,6 +729,16 @@ std::vector<hardware_interface::StateInterface>
 EthercatDriver::export_state_interfaces()
 {
   std::vector<hardware_interface::StateInterface> state_interfaces;
+  for (uint s = 0; s < ec_modules_.size(); s++) {
+    for (uint i = 0; i < hw_state_prefix_names_[s].size(); i++) {
+      state_interfaces.emplace_back(
+        hardware_interface::StateInterface(
+          hw_state_prefix_names_[s][i],
+          hw_state_interface_names_[s][i],
+          &hw_states_all_[s][i]));
+    }
+  }
+  /*
   // export joint state interface
   for (uint j = 0; j < info_.joints.size(); j++) {
     for (uint i = 0; i < info_.joints[j].state_interfaces.size(); i++) {
@@ -411,6 +769,7 @@ EthercatDriver::export_state_interfaces()
           &hw_gpio_states_[g][i]));
     }
   }
+  */
   return state_interfaces;
 }
 
@@ -418,6 +777,19 @@ std::vector<hardware_interface::CommandInterface>
 EthercatDriver::export_command_interfaces()
 {
   std::vector<hardware_interface::CommandInterface> command_interfaces;
+
+  for (uint s = 0; s < ec_modules_.size(); s++) {
+    for (uint i = 0; i < hw_command_prefix_names_[s].size(); i++) {
+      command_interfaces.emplace_back(
+        hardware_interface::CommandInterface(
+          hw_command_prefix_names_[s][i],
+          hw_command_interface_names_[s][i],
+          &hw_commands_all_[s][i]
+        )
+      );
+    }
+  }
+  /*
   // export joint command interface
   std::vector<double> test;
   for (uint j = 0; j < info_.joints.size(); j++) {
@@ -449,6 +821,7 @@ EthercatDriver::export_command_interfaces()
           &hw_gpio_commands_[g][i]));
     }
   }
+  */
   return command_interfaces;
 }
 

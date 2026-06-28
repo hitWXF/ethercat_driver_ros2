@@ -14,6 +14,10 @@
 //
 // Author: Maciej Bednarczyk (macbednarczyk@gmail.com)
 
+
+// Modified by wang.xinfei  2026-06-27
+// add some print
+
 #include <numeric>
 
 #include "ethercat_generic_plugins/generic_ec_slave.hpp"
@@ -90,8 +94,29 @@ bool GenericEcSlave::setupSlave(
   std::vector<double> * command_interface)
 {
   state_interface_ptr_ = state_interface;
+  
   command_interface_ptr_ = command_interface;
   parameters_ = slave_parameters;
+  //打印state_interface和command_interface
+  RCLCPP_INFO(
+    rclcpp::get_logger("generic_ec_slave"),
+    "state_interface_ptr_ size: %d", state_interface_ptr_->size());
+  for (size_t i = 0; i < state_interface_ptr_->size(); i++)
+  {
+    RCLCPP_INFO(
+      rclcpp::get_logger("generic_ec_slave"),
+      "state_interface_ptr_[%d]: %f", i, (*state_interface_ptr_)[i]);
+  }
+  
+  RCLCPP_INFO(
+    rclcpp::get_logger("generic_ec_slave"),
+    "command_interface_ptr_ size: %d", command_interface_ptr_->size());
+  for (size_t i = 0; i < command_interface_ptr_->size(); i++)
+  {
+    RCLCPP_INFO(
+      rclcpp::get_logger("generic_ec_slave"),
+      "command_interface_ptr_[%d]: %f", i, (*command_interface_ptr_)[i]);
+  }
 
   if (parameters_.find("slave_config") != parameters_.end()) {
     if (!setup_from_config_file(parameters_["slave_config"])) {
@@ -227,6 +252,17 @@ bool GenericEcSlave::setup_from_config(YAML::Node slave_config)
       }
     }
 
+    //打印domain_map_内容
+    for (size_t i = 0; i < domain_map_.size(); ++i) {
+      RCLCPP_INFO(
+        rclcpp::get_logger("generic_ec_slave"),
+        "domain_map_[%zu] = %u",
+        i, domain_map_[i]);
+    }
+      
+
+
+
     return true;
   } else {
     std::cerr << "GenericEcSlave: failed to load slave configuration: empty configuration" <<
@@ -262,12 +298,25 @@ void GenericEcSlave::setup_interface_mapping()
 {
   for (auto & channel_ptr : pdo_channels_info_) {
     auto & channel = *channel_ptr;
+
+    RCLCPP_INFO(
+      rclcpp::get_logger("generic_ec_slave"),
+      "GenericEcSlave:%d interfaces",
+      channel.number_of_interfaces());
+
     for (size_t i = 0; i < channel.number_of_interfaces(); ++i) {
       if (channel.has_state_interface_name(i) ) {
         std::string interface = "state_interface/" + channel.interface_name(i);
         if (parameters_.find(interface) != parameters_.end()) {
           const size_t idx = std::stoi(parameters_[interface]);
+
+          RCLCPP_INFO(
+            rclcpp::get_logger("generic_ec_slave"),
+            "state idx: %d , %s ",
+            idx, channel.interface_name(i).c_str());
+
           channel.set_state_interface_index(channel.interface_name(i), idx);
+
         }
       } else if (channel.has_command_interface_name(i) ) {
         std::string interface = "command_interface/" + channel.interface_name(i);
@@ -275,7 +324,14 @@ void GenericEcSlave::setup_interface_mapping()
           std::string interface = "command_interface/" + channel.interface_name(i);
           if (parameters_.find(interface) != parameters_.end()) {
             const size_t idx = std::stoi(parameters_[interface]);
+
+            RCLCPP_INFO(
+              rclcpp::get_logger("generic_ec_slave"),
+              "command idx: %d , %s ",
+              idx, channel.interface_name(i).c_str());
+
             channel.set_command_interface_index(channel.interface_name(i), idx);
+
           }
         } else {
           throw std::runtime_error(
